@@ -1,309 +1,361 @@
-from django.db.models.signals import post_save, pre_save, post_delete
+from django.db.models.signals import post_save, pre_save, pre_delete
 from django.dispatch import receiver
-from django.db import transaction
 from django.core.mail import send_mail
 from django.conf import settings
-from django.utils import timezone
-from users.models import User
-from .models import Student
-from parents.models import Parent
 import logging
+from .models import Student, StudentEnrollment
+from users.models import User
 
 logger = logging.getLogger(__name__)
 
-@receiver(post_save, sender=User)
-def auto_create_student_profile(sender, instance, created, **kwargs):
-    """
-    Automatically create student profile when user role is 'student'
-    """
-    # Only process if role is student
-    if instance.role != 'student':
-        return
-    
-    try:
-        with transaction.atomic():
-            # Check if student profile already exists
-            if not hasattr(instance, 'student_profile'):
-                # Create student profile with auto-generated fields
-                student = Student.objects.create(user=instance)
-                logger.info(f"Auto-created student profile for {instance.registration_number}")
-                
-                # Send welcome email to student
-                if instance.email and settings.DEBUG:
-                    try:
-                        send_mail(
-                            subject='Welcome to School Student Portal',
-                            message=f"""
-                            Dear {instance.get_full_name()},
-                            
-                            Welcome to the School Student Portal!
-                            
-                            Your student account has been created successfully:
-                            - Registration Number: {instance.registration_number}
-                            - Admission Number: {student.admission_number}
-                            - Student ID: {student.student_id}
-                            
-                            You can now:
-                            1. View your timetable
-                            2. Check your results
-                            3. Track attendance
-                            4. Access learning materials
-                            
-                            Please contact your class teacher if you have any questions.
-                            
-                            Best regards,
-                            School Administration
-                            """,
-                            from_email=settings.DEFAULT_FROM_EMAIL,
-                            recipient_list=[instance.email],
-                            fail_silently=True,
-                        )
-                        logger.info(f"Welcome email sent to student: {instance.email}")
-                    except Exception as e:
-                        logger.error(f"Failed to send student welcome email: {str(e)}")
-                        
-    except Exception as e:
-        logger.error(f"Failed to auto-create student profile for {instance.registration_number}: {str(e)}")
 
-
-@receiver(pre_save, sender=User)
-def handle_role_change_to_student(sender, instance, **kwargs):
+@receiver(pre_save, sender=Student)
+def student_pre_save(sender, instance, **kwargs):
     """
-    Handle user role change to student
+    Signal triggered before saving a Student
     """
-    try:
-        # Get the old user instance if it exists
-        if instance.pk:
-            old_user = User.objects.get(pk=instance.pk)
-            
-            # If role changed TO student
-            if old_user.role != 'student' and instance.role == 'student':
-                logger.info(f"User role changed to student: {instance.registration_number}")
-                
-                # Check if already has student profile
-                if not hasattr(instance, 'student_profile'):
-                    # Student profile will be created in post_save
-                    pass
-                
-            # If role changed FROM student
-            elif old_user.role == 'student' and instance.role != 'student':
-                logger.info(f"User role changed from student to {instance.role}: {instance.registration_number}")
-                
-                # Student profile will be automatically handled by cascade delete or can be kept
-                # We'll keep it but mark as inactive
-                if hasattr(instance, 'student_profile'):
-                    instance.student_profile.is_active = False
-                    instance.student_profile.save()
-                    
-    except User.DoesNotExist:
-        # New user, no old instance
-        pass
-    except Exception as e:
-        logger.error(f"Error handling role change for {instance.registration_number}: {str(e)}")
-
-
-@receiver(post_save, sender=Student)
-def student_profile_post_save(sender, instance, created, **kwargs):
-    """
-    Actions after student profile is saved
-    """
-    if created:
-        logger.info(f"New student profile created: {instance.admission_number} - {instance.user.get_full_name()}")
-        
-        # Send notification to admin about new student
-        try:
-            admin_users = User.objects.filter(role__in=['head', 'principal', 'vice_principal'])
-            for admin in admin_users:
-                if admin.email:
-                    send_mail(
-                        subject='New Student Registration Notification',
-                        message=f"""
-                        New student registered in the system:
-                        
-                        Student Information:
-                        - Name: {instance.user.get_full_name()}
-                        - Admission Number: {instance.admission_number}
-                        - Class: {instance.get_class_level_display()}
-                        - Stream: {instance.get_stream_display()}
-                        - Email: {instance.user.email}
-                        - Phone: {instance.user.phone_number}
-                        - Registration Date: {instance.created_at}
-                        
-                        Please assign the student to a class and link parents if available.
-                        """,
-                        from_email=settings.DEFAULT_FROM_EMAIL,
-                        recipient_list=[admin.email],
-                        fail_silently=True,
-                    )
-        except Exception as e:
-            logger.error(f"Failed to send student notification: {str(e)}")
-        
-        # Notify parents if linked
-        if instance.father or instance.mother:
-            parent_emails = []
-            if instance.father and instance.father.user.email:
-                parent_emails.append(instance.father.user.email)
-            if instance.mother and instance.mother.user.email:
-                parent_emails.append(instance.mother.user.email)
-            
-            for email in parent_emails:
-                try:
-                    send_mail(
-                        subject=f'Your Child {instance.user.get_full_name()} Registered',
-                        message=f"""
-                        Dear Parent,
-                        
-                        Your child {instance.user.get_full_name()} has been registered in the school system.
-                        
-                        Student Details:
-                        - Name: {instance.user.get_full_name()}
-                        - Admission Number: {instance.admission_number}
-                        - Class: {instance.get_class_level_display()}
-                        - Student ID: {instance.student_id}
-                        
-                        You can now access their academic progress through the parent portal.
-                        
-                        Best regards,
-                        School Administration
-                        """,
-                        from_email=settings.DEFAULT_FROM_EMAIL,
-                        recipient_list=[email],
-                        fail_silently=True,
-                    )
-                except Exception as e:
-                    logger.error(f"Failed to send parent notification: {str(e)}")
-    
-    else:
-        # Student profile updated
-        logger.info(f"Student profile updated: {instance.admission_number}")
-        
-        # Log important changes
-        update_fields = kwargs.get('update_fields', [])
-        if update_fields:
-            logger.info(f"Student {instance.admission_number} updated fields: {update_fields}")
-            
-            # Notify if fee status changed
-            if 'fee_status' in update_fields:
-                logger.info(f"Fee status changed for {instance.admission_number}: {instance.get_fee_status_display()}")
-                
-                # Notify parents about fee status change
-                if instance.father or instance.mother:
-                    parent_emails = []
-                    if instance.father and instance.father.user.email:
-                        parent_emails.append(instance.father.user.email)
-                    if instance.mother and instance.mother.user.email:
-                        parent_emails.append(instance.mother.user.email)
-                    
-                    for email in parent_emails:
-                        try:
-                            send_mail(
-                                subject=f'Fee Status Update for {instance.user.get_full_name()}',
-                                message=f"""
-                                Dear Parent,
-                                
-                                The fee status for your child {instance.user.get_full_name()} has been updated.
-                                
-                                New Fee Status: {instance.get_fee_status_display()}
-                                Total Fee: ₦{instance.total_fee_amount}
-                                Amount Paid: ₦{instance.amount_paid}
-                                Balance: ₦{instance.balance_due}
-                                
-                                Please contact the school accountant for any queries.
-                                
-                                Best regards,
-                                School Administration
-                                """,
-                                from_email=settings.DEFAULT_FROM_EMAIL,
-                                recipient_list=[email],
-                                fail_silently=True,
-                            )
-                        except Exception as e:
-                            logger.error(f"Failed to send fee status notification: {str(e)}")
-
-
-@receiver(post_delete, sender=Student)
-def student_profile_post_delete(sender, instance, **kwargs):
-    """
-    Actions after student profile is deleted
-    """
-    logger.warning(f"Student profile deleted: {instance.admission_number} - {instance.user.get_full_name()}")
-    
-    # Send notification to admin
-    try:
-        admin_users = User.objects.filter(role__in=['head', 'principal', 'vice_principal'])
-        for admin in admin_users:
-            if admin.email:
-                send_mail(
-                    subject='Student Profile Deleted',
-                    message=f"""
-                    Student profile has been deleted from the system:
-                    
-                    Deleted Student:
-                    - Name: {instance.user.get_full_name()}
-                    - Admission Number: {instance.admission_number}
-                    - Class: {instance.get_class_level_display()}
-                    - Deletion Date: {timezone.now()}
-                    
-                    Please update any related records.
-                    """,
-                    from_email=settings.DEFAULT_FROM_EMAIL,
-                    recipient_list=[admin.email],
-                    fail_silently=True,
-                )
-    except Exception as e:
-        logger.error(f"Failed to send student deletion notification: {str(e)}")
-
-
-@receiver(post_save, sender=Student)
-def update_student_user_role(sender, instance, **kwargs):
-    """
-    Ensure user role matches student profile
-    """
-    # If user role is not student, update it
-    if instance.user.role != 'student':
+    # Ensure user has student role
+    if instance.user and instance.user.role != 'student':
         instance.user.role = 'student'
         instance.user.save()
-        logger.info(f"Updated user role to student for {instance.user.registration_number}")
+        logger.info(f"User {instance.user.registration_number} role updated to student")
+
+    # Log changes for existing students
+    if instance.pk:
+        try:
+            old_student = Student.objects.get(pk=instance.pk)
+            changes = []
+
+            # Track important field changes
+            for field in ['class_level', 'fee_status', 'is_active', 'is_graduated']:
+                old_value = getattr(old_student, field, None)
+                new_value = getattr(instance, field, None)
+
+                if old_value != new_value:
+                    if field == 'class_level':
+                        old_name = old_value.name if old_value else 'None'
+                        new_name = new_value.name if new_value else 'None'
+                        changes.append(f"{field}: {old_name} -> {new_name}")
+                    else:
+                        changes.append(f"{field}: {old_value} -> {new_value}")
+
+            if changes:
+                logger.info(f"Student {instance.admission_number} updated: {', '.join(changes)}")
+
+        except Student.DoesNotExist:
+            pass
 
 
 @receiver(post_save, sender=Student)
-def link_student_to_parent_by_name(sender, instance, created, **kwargs):
+def student_post_save(sender, instance, created, **kwargs):
     """
-    Attempt to auto-link student to parent by matching names
-    This is a simple heuristic - in production, you'd have a better matching system
+    Signal triggered after saving a Student
     """
-    if created and (not instance.father or not instance.mother):
+    if created:
+        # New student created
+        logger.info(f"New student created: {instance.admission_number} ({instance.student_id})")
+
+        # Send notification to parents if email available
+        self._notify_parents(instance)
+
+        # Create initial enrollment if class level is set
+        if instance.class_level:
+            self._create_initial_enrollment(instance)
+
+    # Handle graduation
+    if instance.is_graduated and instance.pk:
         try:
-            from users.models import User
-            
-            # Try to find father by matching student's last name
-            if not instance.father and instance.user.last_name:
-                father_users = User.objects.filter(
-                    last_name__iexact=instance.user.last_name,
-                    role='parent'
+            old_student = Student.objects.get(pk=instance.pk)
+            if not old_student.is_graduated:
+                logger.info(f"Student {instance.admission_number} graduated")
+                self._handle_graduation(instance)
+        except Student.DoesNotExist:
+            pass
+
+    # Handle fee status changes
+    if instance.pk:
+        try:
+            old_student = Student.objects.get(pk=instance.pk)
+            if old_student.fee_status != instance.fee_status:
+                logger.info(
+                    f"Student {instance.admission_number} fee status changed: "
+                    f"{old_student.fee_status} -> {instance.fee_status}"
                 )
-                
-                for father_user in father_users:
-                    try:
-                        father_parent = father_user.parent_profile
-                        if father_parent.parent_type in ['father', 'guardian']:
-                            instance.father = father_parent
-                            instance.save()
-                            logger.info(f"Auto-linked student {instance.admission_number} to father {father_user.registration_number}")
-                            break
-                    except:
-                        pass
-            
-            # Try to find mother by matching first name (simplistic)
-            if not instance.mother and instance.user.first_name:
-                # In Nigerian context, sometimes mother's maiden name is used
-                # This is just a placeholder logic
-                mother_users = User.objects.filter(
-                    role='parent',
-                    parent_profile__parent_type__in=['mother', 'guardian']
-                )[:5]  # Limit search
-                
-                # More sophisticated matching would be needed in production
-                
+                self._notify_fee_status_change(instance, old_student.fee_status)
+        except Student.DoesNotExist:
+            pass
+
+    def _notify_parents(self, student):
+        """Send notification to parents about student creation"""
+        parents = student.get_parents()
+
+        for parent in parents:
+            if parent.user.email and settings.EMAIL_HOST_USER:
+                try:
+                    subject = f"Student Registration - {settings.SCHOOL_NAME or 'Our School'}"
+                    message = f"""
+                    Dear {parent.user.get_full_name()},
+
+                    Your child {student.user.get_full_name()} has been registered in our school.
+
+                    Student Details:
+                    - Admission Number: {student.admission_number}
+                    - Student ID: {student.student_id}
+                    - Class: {student.class_level.name if student.class_level else 'Not Assigned'}
+                    - Registration Number: {student.user.registration_number}
+
+                    Please keep this information safe.
+
+                    Best regards,
+                    School Administration
+                    """
+
+                    send_mail(
+                        subject,
+                        message,
+                        settings.DEFAULT_FROM_EMAIL,
+                        [parent.user.email],
+                        fail_silently=True,
+                    )
+                    logger.info(f"Student registration notification sent to {parent.user.email}")
+                except Exception as e:
+                    logger.error(f"Failed to send notification to {parent.user.email}: {str(e)}")
+
+    def _create_initial_enrollment(self, student):
+        """Create initial enrollment record for student"""
+        from academic.models import AcademicSession, AcademicTerm
+
+        try:
+            current_session = AcademicSession.objects.filter(is_current=True).first()
+            current_term = AcademicTerm.objects.filter(is_current=True).first()
+
+            if current_session and current_term:
+                enrollment = StudentEnrollment.objects.create(
+                    student=student.user,
+                    class_obj=None,  # Would need specific class object
+                    session=current_session,
+                    term=current_term,
+                    status='active',
+                    enrollment_date=student.admission_date or timezone.now().date(),
+                    enrolled_by=student.user  # Or system user
+                )
+                logger.info(f"Initial enrollment created for student {student.admission_number}")
         except Exception as e:
-            logger.error(f"Error in parent auto-linking: {str(e)}")
+            logger.error(f"Failed to create initial enrollment: {str(e)}")
+
+    def _handle_graduation(self, student):
+        """Handle student graduation"""
+        # Update user status
+        student.user.is_active = False
+        student.user.save()
+
+        # Send graduation notification
+        if student.user.email and settings.EMAIL_HOST_USER:
+            try:
+                subject = f"Congratulations on Graduation - {settings.SCHOOL_NAME or 'Our School'}"
+                message = f"""
+                Dear {student.user.get_full_name()},
+
+                Congratulations on your graduation from {settings.SCHOOL_NAME or 'Our School'}!
+
+                We are proud of your achievements and wish you success in your future endeavors.
+
+                Graduation Details:
+                - Student: {student.user.get_full_name()}
+                - Admission Number: {student.admission_number}
+                - Graduation Date: {student.graduation_date or 'Not specified'}
+                - Final Class: {student.class_level.name if student.class_level else 'Not specified'}
+
+                Best wishes,
+                School Administration
+                """
+
+                send_mail(
+                    subject,
+                    message,
+                    settings.DEFAULT_FROM_EMAIL,
+                    [student.user.email],
+                    fail_silently=True,
+                )
+
+                # Also notify parents
+                parents = student.get_parents()
+                for parent in parents:
+                    if parent.user.email:
+                        parent_subject = f"Your Child's Graduation - {settings.SCHOOL_NAME or 'Our School'}"
+                        parent_message = f"""
+                        Dear {parent.user.get_full_name()},
+
+                        We are pleased to inform you that your child {student.user.get_full_name()} 
+                        has successfully graduated from {settings.SCHOOL_NAME or 'Our School'}.
+
+                        Congratulations to you and your family!
+
+                        Best regards,
+                        School Administration
+                        """
+
+                        send_mail(
+                            parent_subject,
+                            parent_message,
+                            settings.DEFAULT_FROM_EMAIL,
+                            [parent.user.email],
+                            fail_silently=True,
+                        )
+
+                logger.info(f"Graduation notifications sent for student {student.admission_number}")
+            except Exception as e:
+                logger.error(f"Failed to send graduation notifications: {str(e)}")
+
+    def _notify_fee_status_change(self, student, old_status):
+        """Notify about fee status change"""
+        if student.user.email and settings.EMAIL_HOST_USER:
+            try:
+                subject = f"Fee Status Update - {settings.SCHOOL_NAME or 'Our School'}"
+                message = f"""
+                Dear {student.user.get_full_name()},
+
+                Your fee status has been updated.
+
+                Old Status: {old_status}
+                New Status: {student.fee_status}
+                Amount Paid: ₦{student.amount_paid:,.2f}
+                Total Fee: ₦{student.total_fee_amount:,.2f}
+                Balance Due: ₦{student.balance_due:,.2f}
+
+                Thank you for your prompt payment.
+
+                Best regards,
+                School Administration
+                """
+
+                send_mail(
+                    subject,
+                    message,
+                    settings.DEFAULT_FROM_EMAIL,
+                    [student.user.email],
+                    fail_silently=True,
+                )
+                logger.info(f"Fee status change notification sent to {student.user.email}")
+            except Exception as e:
+                logger.error(f"Failed to send fee status notification: {str(e)}")
+
+
+@receiver(pre_save, sender=StudentEnrollment)
+def enrollment_pre_save(sender, instance, **kwargs):
+    """
+    Signal triggered before saving a StudentEnrollment
+    """
+    # Auto-generate enrollment number if not set
+    if not instance.enrollment_number and instance.student and instance.session and instance.class_obj:
+        year = instance.session.start_date.year
+        student_id = instance.student.registration_number
+        class_code = instance.class_obj.code
+        instance.enrollment_number = f"ENR-{year}-{class_code}-{student_id}"
+
+    # Log enrollment status changes
+    if instance.pk:
+        try:
+            old_enrollment = StudentEnrollment.objects.get(pk=instance.pk)
+            if old_enrollment.status != instance.status:
+                logger.info(
+                    f"Enrollment {instance.enrollment_number} status changed: "
+                    f"{old_enrollment.status} -> {instance.status}"
+                )
+
+                # Send notification for important status changes
+                if instance.status == 'active' and old_enrollment.status != 'active':
+                    self._notify_enrollment_activation(instance)
+        except StudentEnrollment.DoesNotExist:
+            pass
+
+    def _notify_enrollment_activation(self, enrollment):
+        """Notify about enrollment activation"""
+        if enrollment.student.email and settings.EMAIL_HOST_USER:
+            try:
+                subject = f"Enrollment Activated - {settings.SCHOOL_NAME or 'Our School'}"
+                message = f"""
+                Dear {enrollment.student.get_full_name()},
+
+                Your enrollment has been activated.
+
+                Enrollment Details:
+                - Enrollment Number: {enrollment.enrollment_number}
+                - Class: {enrollment.class_obj.name if enrollment.class_obj else 'Not specified'}
+                - Session: {enrollment.session.name}
+                - Term: {enrollment.term.name}
+                - Status: {enrollment.get_status_display()}
+                - Enrollment Date: {enrollment.enrollment_date}
+
+                You can now access all class materials and participate in activities.
+
+                Best regards,
+                School Administration
+                """
+
+                send_mail(
+                    subject,
+                    message,
+                    settings.DEFAULT_FROM_EMAIL,
+                    [enrollment.student.email],
+                    fail_silently=True,
+                )
+                logger.info(f"Enrollment activation notification sent to {enrollment.student.email}")
+            except Exception as e:
+                logger.error(f"Failed to send enrollment activation notification: {str(e)}")
+
+
+@receiver(pre_delete, sender=Student)
+def student_pre_delete(sender, instance, **kwargs):
+    """
+    Signal triggered before deleting a Student
+    """
+    # Log student deletion
+    logger.warning(
+        f"Student {instance.admission_number} ({instance.user.get_full_name()}) "
+        f"is being deleted from the system"
+    )
+
+    # Archive important data before deletion
+    # In production, you might want to soft delete instead
+    self._archive_student_data(instance)
+
+    def _archive_student_data(self, student):
+        """Archive student data before deletion"""
+        # This is a placeholder for actual archiving logic
+        # In production, you might:
+        # 1. Create an archive record
+        # 2. Move files to archive storage
+        # 3. Update references
+        pass
+
+
+def setup_student_signals():
+    """
+    Function to explicitly set up student signals
+    Call this in apps.py ready() method
+    """
+    from django.db.models.signals import post_save, pre_save, pre_delete
+
+    # Connect signals
+    pre_save.connect(student_pre_save, sender=Student)
+    post_save.connect(student_post_save, sender=Student)
+    pre_save.connect(enrollment_pre_save, sender=StudentEnrollment)
+    pre_delete.connect(student_pre_delete, sender=Student)
+
+    logger.info("Student signals setup completed")
+
+
+def disconnect_student_signals():
+    """
+    Function to disconnect student signals (for testing)
+    """
+    from django.db.models.signals import post_save, pre_save, pre_delete
+
+    # Disconnect signals
+    pre_save.disconnect(student_pre_save, sender=Student)
+    post_save.disconnect(student_post_save, sender=Student)
+    pre_save.disconnect(enrollment_pre_save, sender=StudentEnrollment)
+    pre_delete.disconnect(student_pre_delete, sender=Student)
+
+    logger.info("Student signals disconnected")

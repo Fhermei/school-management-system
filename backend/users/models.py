@@ -4,9 +4,10 @@ from django.utils import timezone
 import random
 import string
 
+
 class CustomUserManager(BaseUserManager):
     """Custom user manager to handle user creation with registration numbers"""
-    
+
     def create_user(self, registration_number=None, email=None, password=None, **extra_fields):
         """Create and save a regular user with registration number"""
         if not registration_number:
@@ -20,36 +21,37 @@ class CustomUserManager(BaseUserManager):
                 registration_number = f"{prefix}{random_digits}"
             else:
                 raise ValueError('Either registration_number or first_name must be set')
-        
+
         # Set registration number in extra_fields
         extra_fields['registration_number'] = registration_number
-        
+
         email = self.normalize_email(email)
         user = self.model(email=email, **extra_fields)
         user.set_password(password)
         user.save(using=self._db)
         return user
-    
+
     def create_superuser(self, registration_number=None, email=None, password=None, **extra_fields):
         """Create and save a superuser"""
         extra_fields.setdefault('is_staff', True)
         extra_fields.setdefault('is_superuser', True)
         extra_fields.setdefault('is_active', True)
         extra_fields.setdefault('role', 'head')  # Head of School is superuser
-        
+
         if extra_fields.get('is_staff') is not True:
             raise ValueError('Superuser must have is_staff=True.')
         if extra_fields.get('is_superuser') is not True:
             raise ValueError('Superuser must have is_superuser=True.')
-        
+
         return self.create_user(registration_number, email, password, **extra_fields)
+
 
 class User(AbstractUser):
     """Custom User model for School Management System (Nigeria Context)"""
-    
+
     # Remove username field from AbstractUser
     username = None
-    
+
     # Role Choices
     ROLE_CHOICES = (
         ('head', 'Head of School/Proprietor'),
@@ -67,13 +69,13 @@ class User(AbstractUser):
         ('security', 'Security Personnel'),
         ('cleaner', 'Cleaner'),
     )
-    
+
     # Gender Choices
     GENDER_CHOICES = (
         ('male', 'Male'),
         ('female', 'Female'),
     )
-    
+
     # Nigerian States
     NIGERIAN_STATES = (
         ('abia', 'Abia'), ('adamawa', 'Adamawa'), ('akwa_ibom', 'Akwa Ibom'),
@@ -90,10 +92,10 @@ class User(AbstractUser):
         ('taraba', 'Taraba'), ('yobe', 'Yobe'), ('zamfara', 'Zamfara'),
         ('fct', 'Federal Capital Territory'),
     )
-    
-    # Core User Fields (Keep These)
+
+    # Core User Fields
     registration_number = models.CharField(
-        max_length=20, 
+        max_length=20,
         unique=True,
         help_text="Auto-generated: first 4 letters of first name + 4 digits"
     )
@@ -103,31 +105,31 @@ class User(AbstractUser):
     phone_number = models.CharField(max_length=15, blank=True)
     alternative_phone = models.CharField(max_length=15, blank=True)
     profile_picture = models.ImageField(upload_to='profile_pictures/', blank=True, null=True)
-    
-    # Address Information (Keep These)
+
+    # Address Information
     address = models.TextField(blank=True)
     city = models.CharField(max_length=100, blank=True)
     state_of_origin = models.CharField(max_length=50, choices=NIGERIAN_STATES, blank=True)
     lga = models.CharField(max_length=100, blank=True, verbose_name="Local Government Area")
     nationality = models.CharField(max_length=50, default='Nigerian')
-    
-    # Status & Tracking (Keep These)
+
+    # Status & Tracking
     is_active = models.BooleanField(default=True)
     is_verified = models.BooleanField(default=False)
     last_login_ip = models.GenericIPAddressField(blank=True, null=True)
     login_count = models.IntegerField(default=0)
-    
-    # Timestamps (Keep These)
+
+    # Timestamps
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
-    
+
     # Set custom manager
     objects = CustomUserManager()
-    
+
     # Use registration_number as the username field for authentication
     USERNAME_FIELD = 'registration_number'
     REQUIRED_FIELDS = ['email', 'first_name', 'last_name']
-    
+
     class Meta:
         ordering = ['-created_at']
         verbose_name = 'User'
@@ -137,10 +139,10 @@ class User(AbstractUser):
             models.Index(fields=['email']),
             models.Index(fields=['role']),
         ]
-    
+
     def __str__(self):
         return f"{self.get_full_name()} - {self.registration_number} ({self.get_role_display()})"
-    
+
     def save(self, *args, **kwargs):
         """Auto-generate registration number if not set"""
         if not self.registration_number:
@@ -151,27 +153,24 @@ class User(AbstractUser):
                 prefix = clean_name[:4].lower() if clean_name else 'user'
             else:
                 prefix = 'user'
-            
+
             # Ensure prefix is at least 4 characters
             while len(prefix) < 4:
                 prefix += 'x'
-            
+
             # Generate 4 random digits
             random_digits = ''.join(random.choices(string.digits, k=4))
             self.registration_number = f"{prefix}{random_digits}"
-        
+
         super().save(*args, **kwargs)
-    
+
     def get_display_name(self):
         """Get display name for the user"""
         if self.first_name and self.last_name:
             return f"{self.first_name} {self.last_name}"
         return self.registration_number
-    
+
     def can_change_password(self):
         """Check if user can change password themselves"""
         # Only admin/principal/head can change passwords
         return self.role in ['head', 'principal', 'vice_principal']
-    
-    
-    
